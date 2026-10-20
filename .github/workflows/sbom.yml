@@ -1,0 +1,115 @@
+name: SBOM
+
+# This workflow provides the required status check named "SBOM".
+# The job name below must stay exactly "SBOM", or pull requests cannot merge.
+#
+# Adapted from the team's existing SBOM workflow:
+#   - runs on pull requests (a required check must report on the PR itself)
+#   - no Node-specific steps: Syft reads go.mod, package-lock.json, yarn.lock and
+#     packages.lock.json directly, so the same file works for Go, C# and React repos
+#
+# C# repositories: set <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+# in the projects and commit packages.lock.json, so the SBOM lists NuGet packages.
+#
+# To run locally with nektos/act on Apple silicon:
+#   act workflow_dispatch -W .github/workflows/sbom.yml -j sbom \
+#     --input tag=develop -s GITHUB_TOKEN=<GH user personal access token> \
+#     -P ubuntu-latest=catthehacker/ubuntu:act-latest \
+#     --container-architecture linux/amd64 --env ACT=true --bind
+
+on:
+  pull_request:
+    branches: [develop, main, 'release/**', 'hotfix/**']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag or branch to scan"
+        required: false
+        default: "develop"
+
+permissions:
+  contents: read
+
+jobs:
+  sbom:
+    name: SBOM
+    runs-on: ubuntu-latest
+    env:
+      ACT: 'false'
+      # Leave empty to report findings without failing the check.
+      # Set to a severity (for example "high") to fail the check at or above it.
+      FAIL_ON: ''
+      # TODO: pin to a grype release tag (for example vX.Y.Z) instead of latest.
+      GRYPE_VERSION: ''
+
+    steps:
+      # TODO: pin third-party actions to commit SHAs once TSWPL-14 sets the policy.
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag }}
+
+      - name: Install curl (act only)
+        if: env.ACT == 'true'
+        run: |
+          apt-get update
+          apt-get install -y curl
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: sbom.cyclonedx.json
+          upload-artifact: ${{ env.ACT != 'true' }}
+          artifact-name: "${{ github.event.repository.name }}-sbom.cyclonedx.json"
+
+      - name: Scan SBOM
+        run: |
+          set -euo pipefail
+
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh -o install.sh
+          bash install.sh -b "$RUNNER_TEMP/bin" ${GRYPE_VERSION:+"$GRYPE_VERSION"}
+          GRYPE="$RUNNER_TEMP/bin/grype"
+
+          fail_args=()
+          if [ -n "$FAIL_ON" ]; then fail_args=(--fail-on "$FAIL_ON"); fi
+
+          # Write both reports first, then fail on severity if requested.
+          "$GRYPE" -o cyclonedx-json --file scan.cyclonedx.json sbom:sbom.cyclonedx.json
+          set +e
+          "$GRYPE" -o table --file scan.txt "${fail_args[@]}" sbom:sbom.cyclonedx.json
+          status=$?
+          set -e
+
+          echo "##"
+          echo "## Scan results:"
+          echo "##"
+          cat scan.txt
+          exit $status
+
+      - name: Name for scan artifact
+        if: always() && env.ACT != 'true'
+        id: names
+        env:
+          REF: ${{ github.event.inputs.tag || github.head_ref || github.ref_name }}
+        run: |
+          echo "tag=${REF//\//_}" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +'%Y%m%d%H%M')" >> "$GITHUB_OUTPUT"
+
+      - name: Upload scan results
+        if: always() && env.ACT != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: "${{ github.event.repository.name }}-${{ steps.names.outputs.tag }}-scan-${{ steps.names.outputs.date }}-${{ github.run_number }}"
+          path: |
+            sbom.cyclonedx.json
+            scan.cyclonedx.json
+            scan.txt
+          retention-days: 90
+
+      - name: Export artifacts locally (act only)
+        if: always() && env.ACT == 'true'
+        run: |
+          mkdir -p ./act-artifacts
+          cp sbom.cyclonedx.json scan.cyclonedx.json scan.txt ./act-artifacts/

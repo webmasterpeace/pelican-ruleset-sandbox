@@ -1,0 +1,4 @@
+act-artifacts/
+sbom.cyclonedx.json
+scan.cyclonedx.json
+scan.txt
