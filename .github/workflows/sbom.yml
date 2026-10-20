@@ -45,7 +45,7 @@ jobs:
     steps:
       # TODO: pin third-party actions to commit SHAs once TSWPL-14 sets the policy.
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag }}
 
